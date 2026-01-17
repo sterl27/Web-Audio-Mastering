@@ -10,6 +10,7 @@ A desktop app for mastering AI-generated music (Suno, Udio, etc.) to streaming-r
 ## Features
 
 ### Loudness & Dynamics
+- **Input Gain** - Adjust input level before processing (-12dB to +12dB)
 - **Loudness Normalization** - Automatically adjusts to Spotify's -14 LUFS standard
 - **True Peak Limiting** - Prevents clipping with adjustable ceiling (-3dB to 0dB)
 - **Glue Compression** - Light compression to glue the mix together and add punch
@@ -29,6 +30,7 @@ A desktop app for mastering AI-generated music (Suno, Udio, etc.) to streaming-r
 - **Mono Bass** - Narrows bass below 80Hz for better club/speaker compatibility
 
 ### Output
+- **Waveform Display** - Visual waveform with click-to-seek functionality
 - **Level Meter** - Real-time stereo peak metering with peak hold and overload indicator
 - **Real-time Preview** - Hear EQ and effect changes before exporting
 - **FX Bypass** - Toggle all effects to compare before/after
@@ -83,6 +85,31 @@ ISC
 ---
 
 ## Changelog
+
+### v1.3.1 (2026-01-17)
+
+**UI Overhaul**
+- Redesigned layout from sidebar to horizontal header for better use of space
+- Added WaveSurfer.js waveform visualization with click-to-seek functionality
+- Replaced sliders with vertical faders for Input Gain, Ceiling, and 5-band EQ
+- Updated transport controls (Play, Stop, Bypass) with SVG icons
+- "Live" badges now hidden until audio is loaded
+
+**New Features**
+- Input Gain fader - adjust input level before processing (-12dB to +12dB)
+- Ceiling fader - precise true peak ceiling control (-3dB to 0dB)
+- Window auto-resizes to optimal size (1050x910) when audio loads
+- Toast notifications with 5-second auto-dismiss
+
+**Export Improvements**
+- Export now shows modal with progress bar (same style as file loading)
+- Cancel button available in export modal
+- Better progress feedback during rendering
+
+**UI Polish**
+- Consistent fader heights across Loudness and EQ sections
+- Improved spacing between waveform and level meter
+- Added visual separator between EQ faders and presets
 
 ### v1.3.0 (2026-01-17)
 

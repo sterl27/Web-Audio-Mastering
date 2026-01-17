@@ -19,14 +19,3 @@ Thumbs.db
 
 # Logs
 *.log
-
-# Claude Code generated docs
-CLAUDE.md
-ARCHITECTURE_MUSINGS.md
-FFMPEG_ANALYSIS.md
-
-# FFmpeg files (copied by postinstall)
-ffmpeg.js
-814.ffmpeg.js
-ffmpeg-core.js
-ffmpeg-core.wasm

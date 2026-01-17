@@ -1,3 +1,19 @@
+import WaveSurfer from 'wavesurfer.js';
+import { Fader } from './components/Fader.js';
+
+let wavesurfer = null;
+
+// Fader instances
+const faders = {
+  inputGain: null,
+  ceiling: null,
+  eqLow: null,
+  eqLowMid: null,
+  eqMid: null,
+  eqHighMid: null,
+  eqHigh: null,
+};
+
 // ============================================================================
 // LUFS Loudness Measurement & Normalization (Pure JavaScript - No FFmpeg)
 // ============================================================================
@@ -155,7 +171,8 @@ const playerState = {
   isSeeking: false,
   startTime: 0,
   pauseTime: 0,
-  seekUpdateInterval: null
+  seekUpdateInterval: null,
+  seekTimeout: null
 };
 
 const audioNodes = {
@@ -167,6 +184,8 @@ const audioNodes = {
   analyserR: null,   // Right channel analyser for meter
   meterSplitter: null,
   gain: null,
+  // Input gain (first in chain)
+  inputGain: null,
   // Effects chain
   highpass: null,
   lowshelf: null,    // mud cut
@@ -246,20 +265,42 @@ const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const statusMessage = document.getElementById('statusMessage');
 
+// Toast helper with auto-clear
+let toastTimeout = null;
+function showToast(message, type = '', duration = 5000) {
+  if (toastTimeout) clearTimeout(toastTimeout);
+  statusMessage.textContent = message;
+  statusMessage.className = 'status-message' + (type ? ' ' + type : '');
+  if (duration > 0) {
+    toastTimeout = setTimeout(() => {
+      statusMessage.textContent = '';
+      statusMessage.className = 'status-message';
+    }, duration);
+  }
+}
+
 // Player elements
 const playBtn = document.getElementById('playBtn');
 const stopBtn = document.getElementById('stopBtn');
 const playIcon = document.getElementById('playIcon');
+const pauseIcon = document.getElementById('pauseIcon');
 const seekBar = document.getElementById('seekBar');
 const currentTimeEl = document.getElementById('currentTime');
 const durationEl = document.getElementById('duration');
 const bypassBtn = document.getElementById('bypassBtn');
 
+// Helper to update play/pause icons
+function updatePlayPauseIcon(isPlaying) {
+  if (playIcon && pauseIcon) {
+    playIcon.style.display = isPlaying ? 'none' : 'flex';
+    pauseIcon.style.display = isPlaying ? 'flex' : 'none';
+  }
+}
+
 // Settings
 const normalizeLoudness = document.getElementById('normalizeLoudness');
 const truePeakLimit = document.getElementById('truePeakLimit');
-const truePeakSlider = document.getElementById('truePeakCeiling');
-const ceilingValue = document.getElementById('ceilingValue');
+// truePeakSlider and ceilingValue removed - now using faders
 const cleanLowEnd = document.getElementById('cleanLowEnd');
 const glueCompression = document.getElementById('glueCompression');
 const stereoWidthSlider = document.getElementById('stereoWidth');
@@ -271,12 +312,18 @@ const tameHarsh = document.getElementById('tameHarsh');
 const sampleRate = document.getElementById('sampleRate');
 const bitDepth = document.getElementById('bitDepth');
 
-// EQ elements
-const eqLow = document.getElementById('eqLow');
-const eqLowMid = document.getElementById('eqLowMid');
-const eqMid = document.getElementById('eqMid');
-const eqHighMid = document.getElementById('eqHighMid');
-const eqHigh = document.getElementById('eqHigh');
+// EQ values (managed by faders)
+let eqValues = {
+  low: 0,
+  lowMid: 0,
+  mid: 0,
+  highMid: 0,
+  high: 0
+};
+
+// Input gain and ceiling values (managed by faders)
+let inputGainValue = 0;  // dB
+let ceilingValueDb = -1; // dB
 
 // Level meter elements
 const meterCanvas = document.getElementById('meterCanvas');
@@ -314,6 +361,8 @@ function createAudioChain() {
   audioNodes.meterSplitter = ctx.createChannelSplitter(2);
 
   // Create nodes
+  audioNodes.inputGain = ctx.createGain();
+  audioNodes.inputGain.gain.value = 1.0; // 0dB default
   audioNodes.gain = ctx.createGain();
   audioNodes.highpass = ctx.createBiquadFilter();
   audioNodes.lowshelf = ctx.createBiquadFilter();
@@ -435,8 +484,7 @@ function updateAudioChain() {
 
   // Limiter
   if (truePeakLimit.checked && !playerState.isBypassed) {
-    const ceiling = parseFloat(truePeakSlider.value);
-    audioNodes.limiter.threshold.value = ceiling;
+    audioNodes.limiter.threshold.value = ceilingValueDb;
     audioNodes.limiter.ratio.value = 20;
   } else {
     audioNodes.limiter.threshold.value = 0;
@@ -469,8 +517,9 @@ function updateStereoWidth() {
 }
 
 function connectAudioChain(source) {
-  // First part of chain: source -> highpass -> EQ -> effects
+  // First part of chain: source -> inputGain -> highpass -> EQ -> effects
   const preChain = source
+    .connect(audioNodes.inputGain)
     .connect(audioNodes.highpass);
 
   preChain
@@ -528,19 +577,155 @@ function updateEQ() {
     audioNodes.eqHighMid.gain.value = 0;
     audioNodes.eqHigh.gain.value = 0;
   } else {
-    audioNodes.eqLow.gain.value = parseFloat(eqLow.value);
-    audioNodes.eqLowMid.gain.value = parseFloat(eqLowMid.value);
-    audioNodes.eqMid.gain.value = parseFloat(eqMid.value);
-    audioNodes.eqHighMid.gain.value = parseFloat(eqHighMid.value);
-    audioNodes.eqHigh.gain.value = parseFloat(eqHigh.value);
+    audioNodes.eqLow.gain.value = eqValues.low;
+    audioNodes.eqLowMid.gain.value = eqValues.lowMid;
+    audioNodes.eqMid.gain.value = eqValues.mid;
+    audioNodes.eqHighMid.gain.value = eqValues.highMid;
+    audioNodes.eqHigh.gain.value = eqValues.high;
   }
+}
 
-  // Update display values
-  document.getElementById('eqLowVal').textContent = `${eqLow.value} dB`;
-  document.getElementById('eqLowMidVal').textContent = `${eqLowMid.value} dB`;
-  document.getElementById('eqMidVal').textContent = `${eqMid.value} dB`;
-  document.getElementById('eqHighMidVal').textContent = `${eqHighMid.value} dB`;
-  document.getElementById('eqHighVal').textContent = `${eqHigh.value} dB`;
+function updateInputGain() {
+  if (!audioNodes.inputGain) return;
+  const linear = Math.pow(10, inputGainValue / 20);
+  audioNodes.inputGain.gain.setValueAtTime(linear, audioNodes.context?.currentTime || 0);
+}
+
+// ============================================================================
+// Fader Initialization
+// ============================================================================
+
+function initFaders() {
+  // Input Gain Fader
+  faders.inputGain = new Fader('#inputGainFader', {
+    min: -12,
+    max: 12,
+    value: 0,
+    step: 0.5,
+    label: 'Input',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      inputGainValue = val;
+      updateInputGain();
+    }
+  });
+
+  // Ceiling Fader
+  faders.ceiling = new Fader('#ceilingFader', {
+    min: -6,
+    max: 0,
+    value: -1,
+    step: 0.5,
+    label: 'Ceiling',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      ceilingValueDb = val;
+      updateAudioChain();
+    }
+  });
+
+  // EQ Faders
+  faders.eqLow = new Fader('#eqLowFader', {
+    min: -12,
+    max: 12,
+    value: 0,
+    step: 0.5,
+    label: '80Hz',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      eqValues.low = val;
+      updateEQ();
+      clearActivePreset();
+    }
+  });
+
+  faders.eqLowMid = new Fader('#eqLowMidFader', {
+    min: -12,
+    max: 12,
+    value: 0,
+    step: 0.5,
+    label: '250Hz',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      eqValues.lowMid = val;
+      updateEQ();
+      clearActivePreset();
+    }
+  });
+
+  faders.eqMid = new Fader('#eqMidFader', {
+    min: -12,
+    max: 12,
+    value: 0,
+    step: 0.5,
+    label: '1kHz',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      eqValues.mid = val;
+      updateEQ();
+      clearActivePreset();
+    }
+  });
+
+  faders.eqHighMid = new Fader('#eqHighMidFader', {
+    min: -12,
+    max: 12,
+    value: 0,
+    step: 0.5,
+    label: '4kHz',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      eqValues.highMid = val;
+      updateEQ();
+      clearActivePreset();
+    }
+  });
+
+  faders.eqHigh = new Fader('#eqHighFader', {
+    min: -12,
+    max: 12,
+    value: 0,
+    step: 0.5,
+    label: '12kHz',
+    unit: 'dB',
+    orientation: 'vertical',
+    height: 120,
+    showScale: false,
+    decimals: 1,
+    onChange: (val) => {
+      eqValues.high = val;
+      updateEQ();
+      clearActivePreset();
+    }
+  });
+}
+
+function clearActivePreset() {
+  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
 }
 
 // ============================================================================
@@ -613,6 +798,11 @@ function encodeWAV(audioBuffer, targetSampleRate, bitDepth) {
  */
 function createOfflineNodes(offlineCtx, settings) {
   const nodes = {};
+
+  // Input gain (first in chain)
+  nodes.inputGain = offlineCtx.createGain();
+  const inputGainDb = settings.inputGain || 0;
+  nodes.inputGain.gain.value = Math.pow(10, inputGainDb / 20);
 
   nodes.highpass = offlineCtx.createBiquadFilter();
   nodes.lowshelf = offlineCtx.createBiquadFilter();
@@ -725,7 +915,8 @@ async function renderOffline(sourceBuffer, settings, onProgress) {
 
   const nodes = createOfflineNodes(offlineCtx, settings);
 
-  source.connect(nodes.highpass)
+  source.connect(nodes.inputGain)
+    .connect(nodes.highpass)
     .connect(nodes.eqLow)
     .connect(nodes.eqLowMid)
     .connect(nodes.eqMid)
@@ -913,6 +1104,240 @@ function stopMeter() {
 }
 
 // ============================================================================
+// WaveSurfer Waveform
+// ============================================================================
+
+function initWaveSurfer(audioBuffer, originalBlob) {
+  if (wavesurfer) {
+    wavesurfer.destroy();
+    wavesurfer = null;
+  }
+
+  // Create gradient
+  const ctx = document.createElement('canvas').getContext('2d');
+  const waveGradient = ctx.createLinearGradient(0, 0, 0, 48);
+  waveGradient.addColorStop(0, 'rgba(188, 177, 231, 0.8)');
+  waveGradient.addColorStop(0.5, 'rgba(154, 143, 209, 0.6)');
+  waveGradient.addColorStop(1, 'rgba(100, 90, 160, 0.3)');
+
+  const progressGradient = ctx.createLinearGradient(0, 0, 0, 48);
+  progressGradient.addColorStop(0, '#BCB1E7');
+  progressGradient.addColorStop(0.5, '#9A8FD1');
+  progressGradient.addColorStop(1, '#7A6FB1');
+
+  // Extract peaks for immediate display
+  const peaks = extractPeaks(audioBuffer);
+
+  // Create blob URL for WaveSurfer
+  const blobUrl = URL.createObjectURL(originalBlob);
+
+  wavesurfer = WaveSurfer.create({
+    container: '#waveform',
+    waveColor: waveGradient,
+    progressColor: progressGradient,
+    cursorColor: '#ffffff',
+    cursorWidth: 2,
+    height: 48,
+    barWidth: 2,
+    barGap: 1,
+    barRadius: 2,
+    normalize: true,
+    interact: true,
+    dragToSeek: true,
+    url: blobUrl,
+    peaks: [peaks],
+    duration: audioBuffer.duration,
+  });
+
+  // Custom hover handler (uses our known duration, not WaveSurfer's state)
+  setupWaveformHover(audioBuffer.duration);
+
+  // Mute wavesurfer - we use our own Web Audio chain
+  wavesurfer.setVolume(0);
+
+  // Log when audio is ready
+  wavesurfer.on('ready', () => {
+    console.log('WaveSurfer ready, duration:', wavesurfer.getDuration());
+  });
+
+  // Handle click for seeking (click gives relativeX 0-1)
+  wavesurfer.on('click', (relativeX) => {
+    const duration = audioNodes.buffer?.duration || wavesurfer.getDuration();
+    const time = relativeX * duration;
+    console.log('WaveSurfer click:', relativeX, 'time:', time);
+    seekBar.value = time;
+    currentTimeEl.textContent = formatTime(time);
+    seekTo(time);
+  });
+
+  // Handle drag for seeking
+  wavesurfer.on('drag', (relativeX) => {
+    const duration = audioNodes.buffer?.duration || wavesurfer.getDuration();
+    const time = relativeX * duration;
+    seekBar.value = time;
+    currentTimeEl.textContent = formatTime(time);
+    seekTo(time);
+  });
+}
+
+function extractPeaks(audioBuffer, numPeaks = 1000) {
+  const channelData = audioBuffer.getChannelData(0);
+  const samplesPerPeak = Math.floor(channelData.length / numPeaks);
+  const peaks = [];
+
+  for (let i = 0; i < numPeaks; i++) {
+    const start = i * samplesPerPeak;
+    const end = Math.min(start + samplesPerPeak, channelData.length);
+    let max = 0;
+    for (let j = start; j < end; j++) {
+      const abs = Math.abs(channelData[j]);
+      if (abs > max) max = abs;
+    }
+    peaks.push(max);
+  }
+
+  return peaks;
+}
+
+// Custom hover handler for waveform (uses known duration instead of WaveSurfer state)
+let hoverElements = null;
+
+function setupWaveformHover(duration) {
+  const container = document.querySelector('#waveform');
+  if (!container) return;
+
+  // Clean up existing hover elements
+  if (hoverElements) {
+    hoverElements.line.remove();
+    hoverElements.label.remove();
+  }
+
+  // Create hover line
+  const line = document.createElement('div');
+  line.style.cssText = `
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.5);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 10;
+  `;
+  container.style.position = 'relative';
+  container.appendChild(line);
+
+  // Create hover label
+  const label = document.createElement('div');
+  label.style.cssText = `
+    position: absolute;
+    top: 2px;
+    background: #1a1a1a;
+    color: #BCB1E7;
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: 2px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 11;
+    white-space: nowrap;
+  `;
+  container.appendChild(label);
+
+  hoverElements = { line, label };
+
+  // Mouse move handler
+  container.addEventListener('mousemove', (e) => {
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const relX = Math.max(0, Math.min(1, x / rect.width));
+    const time = relX * duration;
+
+    // Format time
+    const minutes = Math.floor(time / 60);
+    const seconds = Math.floor(time % 60);
+    label.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+
+    // Position elements
+    line.style.left = `${x}px`;
+    line.style.opacity = '1';
+
+    // Position label (flip to left side if near right edge)
+    const labelWidth = label.offsetWidth;
+    if (x + labelWidth + 5 > rect.width) {
+      label.style.left = `${x - labelWidth - 2}px`;
+    } else {
+      label.style.left = `${x + 2}px`;
+    }
+    label.style.opacity = '1';
+  });
+
+  // Mouse leave handler
+  container.addEventListener('mouseleave', () => {
+    line.style.opacity = '0';
+    label.style.opacity = '0';
+  });
+}
+
+function audioBufferToBlob(buffer) {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const bytesPerSample = 2; // 16-bit
+  const blockAlign = numChannels * bytesPerSample;
+  const dataSize = length * blockAlign;
+
+  const arrayBuffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(arrayBuffer);
+
+  // WAV header
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // Interleave channels
+  const channels = [];
+  for (let i = 0; i < numChannels; i++) {
+    channels.push(buffer.getChannelData(i));
+  }
+
+  let offset = 44;
+  for (let i = 0; i < length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+function updateWaveSurferProgress(time) {
+  if (!wavesurfer || !audioNodes.buffer) return;
+  const progress = time / audioNodes.buffer.duration;
+  wavesurfer.seekTo(Math.min(1, Math.max(0, progress)));
+}
+
+// ============================================================================
 // EQ Presets
 // ============================================================================
 
@@ -929,11 +1354,20 @@ document.querySelectorAll('.preset-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const preset = eqPresets[btn.dataset.preset];
     if (preset) {
-      eqLow.value = preset.low;
-      eqLowMid.value = preset.lowMid;
-      eqMid.value = preset.mid;
-      eqHighMid.value = preset.highMid;
-      eqHigh.value = preset.high;
+      // Update eqValues state
+      eqValues.low = preset.low;
+      eqValues.lowMid = preset.lowMid;
+      eqValues.mid = preset.mid;
+      eqValues.highMid = preset.highMid;
+      eqValues.high = preset.high;
+
+      // Update fader displays
+      if (faders.eqLow) faders.eqLow.setValue(preset.low);
+      if (faders.eqLowMid) faders.eqLowMid.setValue(preset.lowMid);
+      if (faders.eqMid) faders.eqMid.setValue(preset.mid);
+      if (faders.eqHighMid) faders.eqHighMid.setValue(preset.highMid);
+      if (faders.eqHigh) faders.eqHigh.setValue(preset.high);
+
       updateEQ();
 
       document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
@@ -942,12 +1376,7 @@ document.querySelectorAll('.preset-btn').forEach(btn => {
   });
 });
 
-[eqLow, eqLowMid, eqMid, eqHighMid, eqHigh].forEach(slider => {
-  slider.addEventListener('input', () => {
-    updateEQ();
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-  });
-});
+// EQ fader event listeners are set up in initFaders()
 
 // ============================================================================
 // Audio File Loading
@@ -958,17 +1387,30 @@ const loadingModal = document.getElementById('loadingModal');
 const loadingText = document.getElementById('loadingText');
 const loadingProgressBar = document.getElementById('loadingProgressBar');
 const loadingPercent = document.getElementById('loadingPercent');
+const modalCancelBtn = document.getElementById('modalCancelBtn');
 
-function showLoadingModal(text, percent) {
+function showLoadingModal(text, percent, showCancel = false) {
   loadingModal.classList.remove('hidden');
   loadingText.textContent = text;
   loadingProgressBar.style.width = `${percent}%`;
   loadingPercent.textContent = `${percent}%`;
+  modalCancelBtn.classList.toggle('hidden', !showCancel);
 }
 
 function hideLoadingModal() {
   loadingModal.classList.add('hidden');
+  modalCancelBtn.classList.add('hidden');
 }
+
+// Modal cancel button handler
+modalCancelBtn.addEventListener('click', () => {
+  if (isProcessing) {
+    processingCancelled = true;
+    isProcessing = false;
+    hideLoadingModal();
+    showToast('Export cancelled.');
+  }
+});
 
 async function loadAudioFile(filePath) {
   const ctx = initAudioContext();
@@ -978,6 +1420,20 @@ async function loadAudioFile(filePath) {
   try {
     // Read file data
     const fileData = await window.electronAPI.readFileData(filePath);
+
+    // Create blob from original file data immediately (for WaveSurfer)
+    const ext = filePath.split('.').pop().toLowerCase();
+    const mimeTypes = {
+      mp3: 'audio/mpeg',
+      wav: 'audio/wav',
+      flac: 'audio/flac',
+      aac: 'audio/aac',
+      m4a: 'audio/mp4',
+      mp4: 'audio/mp4'
+    };
+    const mimeType = mimeTypes[ext] || 'audio/mpeg';
+    const originalBlob = new Blob([fileData], { type: mimeType });
+
     let arrayBuffer;
 
     if (fileData instanceof Uint8Array) {
@@ -1015,9 +1471,20 @@ async function loadAudioFile(filePath) {
     durationEl.textContent = formatTime(duration);
     seekBar.max = duration;
 
+    // Initialize waveform display with original file blob
+    initWaveSurfer(audioNodes.buffer, originalBlob);
+
+    // Resize window to accommodate player controls
+    if (window.electronAPI?.resizeWindow) {
+      window.electronAPI.resizeWindow(1050, 910);
+    }
+
     playBtn.disabled = false;
     stopBtn.disabled = false;
     processBtn.disabled = false;
+
+    // Show live indicators
+    document.body.classList.add('audio-loaded');
 
     // Hide modal after brief delay
     setTimeout(() => hideLoadingModal(), 300);
@@ -1026,8 +1493,7 @@ async function loadAudioFile(filePath) {
   } catch (error) {
     console.error('Error loading audio:', error);
     hideLoadingModal();
-    statusMessage.textContent = `Error: ${error.message}`;
-    statusMessage.className = 'status-message error';
+    showToast(`Error: ${error.message}`, 'error');
     return false;
   }
 }
@@ -1053,7 +1519,7 @@ function playAudio() {
   audioNodes.source.onended = () => {
     if (playerState.isPlaying) {
       playerState.isPlaying = false;
-      playIcon.textContent = '▶️';
+      updatePlayPauseIcon(false);
       clearInterval(playerState.seekUpdateInterval);
       stopMeter();
     }
@@ -1063,7 +1529,7 @@ function playAudio() {
   playerState.startTime = audioNodes.context.currentTime - offset;
   audioNodes.source.start(0, offset);
   playerState.isPlaying = true;
-  playIcon.textContent = '⏸️';
+  updatePlayPauseIcon(true);
   startMeter();
 
   clearInterval(playerState.seekUpdateInterval);
@@ -1078,6 +1544,7 @@ function playAudio() {
       } else {
         seekBar.value = currentTime;
         currentTimeEl.textContent = formatTime(currentTime);
+        updateWaveSurferProgress(currentTime);
       }
     }
   }, 100);
@@ -1100,7 +1567,7 @@ function stopAudio() {
     audioNodes.source = null;
   }
   playerState.isPlaying = false;
-  playIcon.textContent = '▶️';
+  updatePlayPauseIcon(false);
   clearInterval(playerState.seekUpdateInterval);
 }
 
@@ -1110,6 +1577,8 @@ function seekTo(time) {
   if (playerState.isPlaying) {
     if (audioNodes.source) {
       try {
+        // Clear onended before stopping to prevent it from setting isPlaying = false
+        audioNodes.source.onended = null;
         audioNodes.source.stop();
         audioNodes.source.disconnect();
       } catch (e) {}
@@ -1123,7 +1592,7 @@ function seekTo(time) {
     audioNodes.source.onended = () => {
       if (playerState.isPlaying) {
         playerState.isPlaying = false;
-        playIcon.textContent = '▶️';
+        updatePlayPauseIcon(false);
         clearInterval(playerState.seekUpdateInterval);
       }
     };
@@ -1143,11 +1612,13 @@ function seekTo(time) {
         } else {
           seekBar.value = currentTime;
           currentTimeEl.textContent = formatTime(currentTime);
+          updateWaveSurferProgress(currentTime);
         }
       }
     }, 100);
   } else {
     currentTimeEl.textContent = formatTime(time);
+    updateWaveSurferProgress(time);
   }
 }
 
@@ -1242,27 +1713,19 @@ stopBtn.addEventListener('click', () => {
   currentTimeEl.textContent = '0:00';
 });
 
-seekBar.addEventListener('change', () => {
-  playerState.isSeeking = false;
-  seekTo(parseFloat(seekBar.value));
-});
-
+// Seek bar is hidden - wavesurfer handles interaction
+// This is kept for programmatic updates only
 seekBar.addEventListener('input', () => {
-  playerState.isSeeking = true;
-  currentTimeEl.textContent = formatTime(parseFloat(seekBar.value));
-});
-
-seekBar.addEventListener('mousedown', () => {
-  playerState.isSeeking = true;
-});
-
-seekBar.addEventListener('mouseup', () => {
-  playerState.isSeeking = false;
+  const time = parseFloat(seekBar.value);
+  currentTimeEl.textContent = formatTime(time);
 });
 
 bypassBtn.addEventListener('click', () => {
   playerState.isBypassed = !playerState.isBypassed;
-  bypassBtn.textContent = playerState.isBypassed ? '🔇 FX Off' : '🔊 FX On';
+  const bypassLabel = bypassBtn.querySelector('.bypass-label');
+  if (bypassLabel) {
+    bypassLabel.textContent = playerState.isBypassed ? 'OFF' : 'FX';
+  }
   bypassBtn.classList.toggle('active', playerState.isBypassed);
   updateAudioChain();
   updateEQ();
@@ -1274,8 +1737,7 @@ bypassBtn.addEventListener('click', () => {
 
 processBtn.addEventListener('click', async () => {
   if (!audioNodes.buffer) {
-    statusMessage.textContent = '✗ No audio loaded';
-    statusMessage.className = 'status-message error';
+    showToast('✗ No audio loaded', 'error');
     return;
   }
 
@@ -1284,15 +1746,12 @@ processBtn.addEventListener('click', async () => {
 
   isProcessing = true;
   processingCancelled = false;
-  progressContainer.classList.remove('hidden');
   processBtn.disabled = true;
-  statusMessage.textContent = '';
-  statusMessage.className = 'status-message';
 
   const settings = {
     normalizeLoudness: normalizeLoudness.checked,
     truePeakLimit: truePeakLimit.checked,
-    truePeakCeiling: parseFloat(truePeakSlider.value),
+    truePeakCeiling: ceilingValueDb,
     cleanLowEnd: cleanLowEnd.checked,
     glueCompression: glueCompression.checked,
     stereoWidth: parseInt(stereoWidthSlider.value),
@@ -1302,29 +1761,27 @@ processBtn.addEventListener('click', async () => {
     tameHarsh: tameHarsh.checked,
     sampleRate: parseInt(sampleRate.value),
     bitDepth: parseInt(bitDepth.value),
-    eqLow: parseFloat(eqLow.value),
-    eqLowMid: parseFloat(eqLowMid.value),
-    eqMid: parseFloat(eqMid.value),
-    eqHighMid: parseFloat(eqHighMid.value),
-    eqHigh: parseFloat(eqHigh.value)
+    inputGain: inputGainValue,
+    eqLow: eqValues.low,
+    eqLowMid: eqValues.lowMid,
+    eqMid: eqValues.mid,
+    eqHighMid: eqValues.highMid,
+    eqHigh: eqValues.high
   };
 
-  const updateProgress = (percent) => {
-    progressFill.style.width = `${percent}%`;
-    progressText.textContent = `${percent}%`;
+  const updateProgress = (percent, text) => {
+    showLoadingModal(text || 'Rendering...', percent, true);
   };
 
   try {
-    updateProgress(2);
-    statusMessage.textContent = 'Preparing audio...';
+    showLoadingModal('Preparing audio...', 2, true);
 
     if (processingCancelled) {
       throw new Error('Cancelled');
     }
 
     // Use Web Audio offline render (same processing chain as preview)
-    updateProgress(5);
-    statusMessage.textContent = 'Rendering audio...';
+    showLoadingModal('Rendering audio...', 5, true);
 
     const outputData = await renderOffline(audioNodes.buffer, settings, updateProgress);
 
@@ -1333,29 +1790,26 @@ processBtn.addEventListener('click', async () => {
     }
 
     // Write output file via IPC
-    updateProgress(95);
-    statusMessage.textContent = 'Saving file...';
+    showLoadingModal('Saving file...', 95, true);
     await window.electronAPI.writeFileData(outputPath, outputData);
 
-    updateProgress(100);
-    statusMessage.textContent = '✓ Export complete! Your mastered file is ready.';
-    statusMessage.className = 'status-message success';
+    showLoadingModal('Complete!', 100, false);
+    setTimeout(() => {
+      hideLoadingModal();
+      showToast('✓ Export complete! Your mastered file is ready.', 'success');
+    }, 300);
 
   } catch (error) {
+    hideLoadingModal();
     if (processingCancelled || error.message === 'Cancelled') {
-      statusMessage.textContent = 'Export cancelled.';
-      statusMessage.className = 'status-message';
+      showToast('Export cancelled.');
     } else {
       console.error('Processing error:', error);
-      statusMessage.textContent = `✗ Error: ${error.message || error}`;
-      statusMessage.className = 'status-message error';
+      showToast(`✗ Error: ${error.message || error}`, 'error');
     }
   }
 
   isProcessing = false;
-  progressContainer.classList.add('hidden');
-  progressFill.style.width = '0%';
-  progressText.textContent = '0%';
   processBtn.disabled = false;
 });
 
@@ -1363,6 +1817,7 @@ cancelBtn.addEventListener('click', () => {
   if (isProcessing) {
     processingCancelled = true;
     isProcessing = false;
+    hideLoadingModal();
   }
 });
 
@@ -1405,10 +1860,7 @@ normalizeLoudness.addEventListener('change', () => {
   });
 });
 
-truePeakSlider.addEventListener('input', () => {
-  ceilingValue.textContent = `${truePeakSlider.value} dB`;
-  updateAudioChain();
-});
+// truePeakSlider event listener removed - now using ceiling fader
 
 stereoWidthSlider.addEventListener('input', () => {
   stereoWidthValue.textContent = `${stereoWidthSlider.value}%`;
@@ -1510,4 +1962,5 @@ document.querySelectorAll('[data-tip]').forEach(el => {
 // Initialize
 // ============================================================================
 
+initFaders();
 updateChecklist();

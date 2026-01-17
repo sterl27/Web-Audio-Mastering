@@ -47,6 +47,13 @@ ipcMain.handle('window-close', () => {
   mainWindow.close();
 });
 
+ipcMain.handle('window-resize', (event, { width, height }) => {
+  const [currentWidth, currentHeight] = mainWindow.getSize();
+  const newWidth = width || currentWidth;
+  const newHeight = height || currentHeight;
+  mainWindow.setSize(newWidth, newHeight, true);
+});
+
 app.whenReady().then(() => {
   createWindow();
 });
