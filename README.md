@@ -2,10 +2,7 @@
 
 A desktop app for mastering AI-generated music (Suno, Udio, etc.) to streaming-ready quality.
 
-<p align="center">
-  <img src="image.png" alt="Web Audio Mastering" width="300">
-  <img src="ui.png" alt="Screenshot" width="500">
-</p>
+![Web Audio Mastering](ui.png)
 
 ## Features
 
